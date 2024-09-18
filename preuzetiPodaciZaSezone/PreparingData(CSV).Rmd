@@ -1,0 +1,1437 @@
+---
+title: "Predicting Premier League Fixtures"
+author: "Tomislav Matanović"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+---
+
+
+
+```{r include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(dplyr)
+#install.packages("zoo")
+library(zoo)
+if (!requireNamespace("phonics", quietly = TRUE)) {
+  install.packages("phonics")
+}
+library(phonics)
+#install.packages("stringdist")
+library(stringdist)
+
+knitr::opts_chunk$set(results = 'hold')
+```
+
+***
+
+# Data Cleaning and Preparation
+
+## Importing and Cleaning Data from 9 .csv files
+
+First, we have downloaded data for 9 seasons of Premier Leagues Fixtures and informations about them from: https://www.football-data.co.uk/englandm.php.
+
+First step is importing them.
+```{r include=FALSE}
+
+#s1314 <- read_csv("../S13-14.csv")
+
+s1415 <- read_csv("../S14-15.csv")
+
+s1516 <- read_csv("../S15-16.csv")
+
+s1617 <- read_csv("../S16-17.csv")
+
+s1718 <- read_csv("../S17-18.csv")
+
+s1819 <- read_csv("../S18-19.csv")
+
+s1920 <- read_csv("../S19-20.csv")
+
+s2021 <- read_csv("../S20-21.csv")
+
+s2122 <- read_csv("../S21-22.csv")
+
+s2223 <- read_csv("../S22-23.csv") 
+
+
+```
+
+If we look at each data frame, we will see that throughout the years, format of saving data has changed (additions or removal of some columns), but we want to coordinate them in order to merge them afterwards together into 1 data frame. To do that, we will remove excess columns (betting odds that are not from B365) and those some more specific odds that I don't find relevant. Also, since season 19./20. new column "Time" has been added. We have to remove it because we don't have that info for prior seasons. Lastly, we will remove first column "Div" because all fixtures are from same division, Premier League.
+
+```{r}
+
+#### WITHOUT COLLUMN TIME ###
+
+#select(s1314, 1:26) %>% select(., -"Div") -> s1314
+
+select(s1415, 1:26) %>% select(., -"Div") -> s1415
+
+select(s1516, 1:26) %>% select(., -"Div") -> s1516
+
+select(s1617, 1:26) %>% select(., -"Div") -> s1617
+
+select(s1718, 1:26) %>% select(., -"Div") -> s1718
+
+select(s1819, 1:26) %>% select(., -"Div") -> s1819
+
+#### WITH COLLUMN TIME ###
+
+select(s1920, 1:27) %>% select(., -"Time", -"Div") -> s1920
+
+select(s2021, 1:27) %>% select(., -"Time", -"Div") -> s2021
+
+select(s2122, 1:27) %>% select(., -"Time", -"Div") -> s2122
+
+select(s2223, 1:27) %>% select(., -"Time", -"Div") -> s2223
+
+```
+
+## Removing empty rows (NA)
+
+We want to inspect given data for empty rows full of NA's. If we find such rows, we will remove them.
+
+```{r}
+
+df_list <- list(s1415, s1516, s1617, s1718, s1819, s1920, s2021, s2122, s2223)
+
+for (i in seq_along(df_list)) {
+  df_name <- paste0("s", 13 + i, 14 + i)  # Get the name of the dataframe
+  empty_rows <- sum(apply(is.na(df_list[[i]]), 1, all))  # Count empty rows
+  print(paste("Dataframe:", df_name, "- Empty Rows:", empty_rows))
+}
+
+# We have found 1 empty row so we will remove it
+s1415 <- s1415[complete.cases(s1415), ]
+
+```
+
+# Enrichment of basic data
+
+## ADDING SEASON STANDINGS DATA
+
+For starters, we will append our data frames for each season with four columns: HPointsATM, APointsATM, HRankATM, ARankATM. Points at the moment (before game for H&A), Table Rank at the moment (before game for H&A).
+
+We have to do this process iteratively because we are updating the data as the season is progressing. There are 38 games in total for each team in one season.
+
+As a help to track teams progress during the season, we will create new dataframe 'standings'. It is going to update itself after every matchup.
+
+Lastly, we have added column named 'Season' to help keep track of the season in which fixture took place.
+
+```{r}
+# Grouping all seasons dataframes
+df_list <- list(s1415, s1516, s1617, s1718, s1819, s1920, s2021, s2122, s2223)
+
+year <- 14
+
+for (season in df_list) {
+  
+  # Converting to Date type and sorting it asc
+  season$Date <- dmy(season$Date)
+  season <- season %>% arrange(Date)
+  
+  standings_name <- paste0("standings_", year, year + 1)
+  standings <- data.frame(
+    Team = unique(season$HomeTeam),
+    Points = rep(0, length(unique(season$HomeTeam))),
+    Position = rep(1, length(unique(season$HomeTeam))),
+    GP = rep(0, length(unique(season$HomeTeam))), #games played, max 38
+    stringsAsFactors = FALSE
+  )
+  
+  #adding columns: Points at the moment(before game for H&A), Table Rank at the moment(before game for H&A)
+  season <- season %>%
+    mutate(
+      HPointsATM = -1,
+      APointsATM = -1,
+      HRankATM = -1,
+      ARankATM = -1,
+      Season = "-1"
+    )
+  
+  for (i in 1:nrow(season)) {
+    # Extract match details
+    home_team <- season[i, "HomeTeam"][[1]]
+    away_team <- season[i, "AwayTeam"][[1]]
+    ftr <- season[i, "FTR"]
+    h_index <- which(standings$Team == home_team)
+    a_index <- which(standings$Team == away_team)
+    
+    # Updating original dataframe
+    season[i, "HPointsATM"] <- standings$Points[h_index]
+    season[i, "APointsATM"] <- standings$Points[a_index]
+    season[i, "HRankATM"] <- standings$Position[h_index]
+    season[i, "ARankATM"] <- standings$Position[a_index]
+    season[i, "Season"] <- as.character(paste0("20", year, "-20", year + 1))
+    
+    # Update points for home and away teams
+    standings$GP[h_index] <- standings$GP[h_index] + 1
+    standings$GP[a_index] <- standings$GP[a_index] + 1
+    
+    if (ftr == "H") {
+      standings$Points[h_index] <- standings$Points[h_index] + 3
+    } else if (ftr == "D") {
+      standings$Points[h_index] <- standings$Points[h_index] + 1
+      standings$Points[a_index] <- standings$Points[a_index] + 1
+    } else {
+      standings$Points[a_index] <- standings$Points[a_index] + 3
+    }
+    
+    # Calculating Positions
+    standings <- standings %>%
+      mutate(Position = min_rank(desc(Points)))
+    
+  }
+  
+  # Sort standings
+  standings <- standings %>%
+    arrange(desc(Points))
+  
+  assign(standings_name, standings)
+  assign(paste0("s", year, year + 1), season)
+  
+  year <- year + 1
+  
+}
+
+
+# Print updated standings
+#print(standings1314)
+
+
+
+```
+
+## ROLLING AVERAGES
+
+Tekst o tome kak nam trebaju APRIORI podaci za svaku tekmu, a da bi to dobili, koritit ćemo APOSTERIORI podatke koje trenutno imamo.
+
+```{r}
+
+# Custom function to calculate rolling avg of last n matches for the team
+rolling_function <- function(df, team, n, i) {
+  if (i > n) {
+    FTG <- 0
+    GC <- 0 #Goals conceded
+    S <- 0
+    ST <- 0
+    F <- 0
+    C <- 0
+    Y <- 0
+    R <- 0
+    for (j in 1:n) {
+      fixture <- df[i-j, ]
+      prefix <- "?" 
+      ifelse(fixture$HomeTeam == team, prefix <- "H", prefix <- "A")
+      
+      FTG <- FTG + fixture[[paste0("FT", prefix, "G")]]
+      GC <- GC + fixture[[paste0("FT", ifelse(prefix == "H", "A", "H"), "G")]]
+      S <- S + fixture[[paste0(prefix, "S")]]
+      ST <- ST + fixture[[paste0(prefix, "ST")]]
+      F <- F + fixture[[paste0(prefix, "F")]]
+      C <- C + fixture[[paste0(prefix, "C")]]
+      Y <- Y + fixture[[paste0(prefix, "Y")]]
+      R <- R + fixture[[paste0(prefix, "R")]]
+    }
+    
+    return(c(FTG / n, GC / n, S / n, ST / n, F / n, C / n, Y / n, R / n))
+    
+  } else {
+    return(c(NA, NA, NA, NA, NA, NA, NA, NA))
+  }
+}
+
+n <- 3 #rolling averages include last n matches
+year <- 14
+df_list <- list(s1415, s1516, s1617, s1718, s1819, s1920, s2021, s2122, s2223)
+
+for (season in df_list) {
+  
+    # sort matches by date
+    season <- season %>% arrange(Date)
+      
+    season <- season %>%
+        mutate(
+          FTHG_roll = -1,
+          HGC_roll = -1, #Goals conceded
+          HS_roll = -1,
+          HST_roll = -1,
+          HF_roll = -1,
+          HC_roll = -1,
+          HY_roll = -1,
+          HR_roll = -1,
+          FTAG_roll = -1,
+          AGC_roll = -1, #Goals conceded
+          AS_roll = -1,
+          AST_roll = -1,
+          AF_roll = -1,
+          AC_roll = -1,
+          AY_roll = -1,
+          AR_roll = -1
+        )
+    
+    # Get unique team names
+    team_names <- unique(c(levels(as.factor(season$HomeTeam)), levels(as.factor(season$AwayTeam))))
+    
+    # Columns from which we want to create rolling averages
+    H_columns <- c("FTHG_roll", "HGC_roll", "HS_roll", "HST_roll", "HF_roll", "HC_roll", "HY_roll", "HR_roll")
+    A_columns <- c("FTAG_roll", "AGC_roll", "AS_roll", "AST_roll", "AF_roll", "AC_roll", "AY_roll", "AR_roll")
+    
+    
+    # Iterate through each team
+    for (team in team_names) {
+    
+      # Filter matches for the current team (either as home or away)
+      team_matches <- season[season$HomeTeam == team | season$AwayTeam == team, ]
+      
+      # Iterate through each row in team_matches
+      for (i in 1:nrow(team_matches)) {
+        
+        fixture <- team_matches[i, ]
+        index <- match(t(apply(fixture[, 1:10], 1, toString)), t(apply(season[, 1:10], 1, toString)))
+        
+        averages <- rolling_function(team_matches, team, n, i)
+        
+        
+        # Update columns in s1415 based on the prefix
+        if (fixture$HomeTeam == team) {
+          for (j in seq_along(H_columns)) {
+            season[index, H_columns[j]] <- averages[j]
+          }
+          
+        } else {
+          for (j in seq_along(A_columns)) {
+            season[index, A_columns[j]] <- averages[j]
+          }
+
+        }
+      }
+    }
+    
+    assign(paste0("s", year, year + 1), season)
+    year <- year + 1
+}
+
+```
+
+We can notice a slight irregularity in the 2020-2021 season. Namely, among the early matches of the season, there are a few cases where we can calculate rolling statistics for the first team because they have already played 3 matches, while for the second team we cannot do so because they have only played 2 matches. There are 4 matches like this in total and they will be excluded from training set.
+
+```{r}
+tempp <- s2021[s2021$HomeTeam == 'Man City' | s2021$AwayTeam == 'Man City', c("Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "FTHG_roll", "HGC_roll", "FTAG_roll", "AGC_roll")]
+
+head(tempp)
+```
+In this view we can see the adressed problem. We are looking at the first few fixtures of season 2020-2021 for the team 'Manchester City'. Third row is the problematic one.
+
+
+
+## MERGING INTO ONE BIG DATA FRAME
+```{r}
+# Merging all matches from all seasons into one 
+df_list <- list(s1415, s1516, s1617, s1718, s1819, s1920, s2021, s2122, s2223)
+all_matches <- do.call(rbind, df_list)
+
+#sort matches by date
+    all_matches <- all_matches %>% arrange(Date)
+    
+dim(all_matches)
+
+```
+
+As we can see, newly created data frame 'all_matches' contains all matches from the previous 9 seasons. Each season has 380 matches, so 380 x 9 = 3420. Everything looks fine.
+
+
+
+# COMPLEMENTING DATA FRAME WITH EXTERNAL DATA
+
+At this point, we have quite rich data frame, but there is still potential to add more info about teams strength.
+
+
+## ADDING INFO ABOUT STARTING LINEUPS, MANAGERS AND VENUE STARTING TIME
+
+To acquire wanted data, we have to make web scraping code. This time, we have used Python, and the code is in the 'scraping.ipynb' file.
+Website used to scrape the data was: https://fbref.com/en/.
+
+There were some difficulties because of the fbrefs scraping policy, so we had to make sure that there is 3 sec pause between two requests to the website. Because of this rule, scraping process took about 5h to complete.
+
+For each match, we collected info about starting 11 for both teams, their manager, venue starting time and matchweek round.
+
+Acquired data is now in the 'all_matches_lineups.csv' file, so firstly we have to import it and then append new data to our data frame.
+
+```{r}
+
+all_matches_lineups <- read_csv("../all_matches_lineups.csv")
+
+head(all_matches_lineups)
+```
+We can take a quick look at the imported data frame. Now, we want to prepare this data frame for merging with our current data frame.
+
+```{r}
+names(all_matches_lineups)[c(2, 3)] <- c("HomeTeam", "AwayTeam")
+
+# Remove the day of the week
+all_matches_lineups$Date <- gsub("^[A-Za-z]+\\s+", "", all_matches_lineups$Date)
+
+# Convert to Date type
+all_matches_lineups$Date <- ymd(mdy(all_matches_lineups$Date))
+
+# Sort matches by date
+all_matches_lineups <- all_matches_lineups %>% arrange(Date)
+ 
+# Removing redundant data
+all_matches_lineups <- all_matches_lineups[, -c(1, 6, 7)]
+
+
+head(all_matches_lineups)
+
+```
+
+Merging new columns from 'all_matches_lineups' to 'all_matches' data frame by keys: Date, HomeTeam, AwayTeam.
+
+The problem is that team names are not the same in both data frames.
+
+```{r}
+unique_teams1 <- sort(unique(c(all_matches$HomeTeam, all_matches$AwayTeam)))
+unique_teams2 <- sort(unique(c(all_matches_lineups$HomeTeam, all_matches_lineups$AwayTeam)))
+
+print(unique_teams1)
+print("---------------")
+print(unique_teams2)
+```
+But they are in the same order when sorted, so we will use their indexes to change team names in the original data frame 'all_matches' with mapping.
+
+```{r}
+# Mapping of team names
+team_mapping <- data.frame(
+  original_name = unique_teams1,
+  standardized_name = unique_teams2
+)
+
+# Standardize team names in all_matches
+all_matches <- all_matches %>%
+  left_join(team_mapping, by = c("HomeTeam" = "original_name")) %>%
+  mutate(HomeTeam = if_else(is.na(standardized_name), HomeTeam, standardized_name)) %>%
+  select(-standardized_name)
+
+all_matches <- all_matches %>%
+  left_join(team_mapping, by = c("AwayTeam" = "original_name")) %>%
+  mutate(AwayTeam = if_else(is.na(standardized_name), AwayTeam, standardized_name)) %>%
+  select(-standardized_name)
+
+print( sort(unique(all_matches$HomeTeam))  )
+print("---------------")
+print( sort(unique(all_matches_lineups$HomeTeam))  )
+```
+Now that we have sortd out this issue, we can procede with merging two data frames.
+
+```{r}
+
+# Merge the two data frames based on Date, HomeTeam, and AwayTeam
+merged_df <- inner_join(all_matches, all_matches_lineups, by = c("Date", "HomeTeam", "AwayTeam"))
+
+# Ensure the order of columns is as desired
+merged_df <- merged_df[, c(names(all_matches), setdiff(names(all_matches_lineups), names(all_matches)))]
+
+# View the merged data frame
+print(dim(merged_df))
+
+head(merged_df)
+
+```
+We intentionally used an inner join to inspect if every row (fixture) was matched, and we can see that the number of rows in 'merged_df' is still 3420, which means that it was successful.
+
+```{r}
+print("Number of rows with missing values before:")
+print(sum(!complete.cases(all_matches)))
+
+print("Number of rows with missing values after:")
+print(sum(!complete.cases(merged_df)))
+```
+Also, number of rows containing at least one NA value is 272, as it was before (some rollin_avg stats). That means that we haven't lost any data in merging process. To explain this number 272 of rows with missing data, it is due to calculation of rolling averages. Every season takes 30 matches to calculate rolling average stats, with exception of season '2020-2021' which took has 32 rows with missing values due to some irregularities.
+
+There are few more changes we can do to polish our data frame and prepare it for Machine Learning process. We will split column 'Date' into 'Year', 'Month', 'Day', column 'Time' into 'Hour', 'Minute' and remove keyword "Matchweek" from 'Matchweek round' column. Goal of this task is to get numeric columns as preparation for ML.
+
+```{r}
+
+# Splitting Date into Year, Month, and Day
+merged_df$Year <- lubridate::year(merged_df$Date)
+merged_df$Month <- lubridate::month(merged_df$Date)
+merged_df$Day <- lubridate::day(merged_df$Date)
+
+# Splitting Time into Hour and Minute
+merged_df$Hour <- lubridate::hour(merged_df$Time)
+merged_df$Minute <- lubridate::minute(merged_df$Time)
+
+
+# Removing "Matchweek" from Matchweek round
+merged_df$"Matchweek round" <- gsub("Matchweek ", "", merged_df$"Matchweek round")
+names(merged_df)[names(merged_df) == "Matchweek round"] <- "Matchweek_round"
+
+
+
+# Converting all new columns to numeric
+num_cols <- c("Year", "Month", "Day", "Hour", "Minute", "Matchweek_round")
+merged_df[num_cols] <- lapply(merged_df[num_cols], as.numeric)
+
+
+```
+
+
+## CALCULATING TEAMS STRENGTH WITH FIFA DATA
+
+The main goal of adding starting linups to data frame is not have names, but to calculate something with those names, team strength!
+
+Idea is to use football game FIFA and its data base to get attributes about each player abilities. Data was downloaded from Kaggle: https://www.kaggle.com/datasets/joebeachcapital/fifa-players?resource=download&select=male_players+%28legacy%29_23.csv
+
+At the moment data frame has a lot of unrelated data, so we will filter only interesting columns.
+
+```{r}
+fifa_15_to_23_players <- read_csv("../male_players (legacy)_23.csv")
+
+columns_to_remove <- c("dob", "league_id", "league_level", "club_team_id", "international_reputation", "mentality_composure")
+
+fifa_15_to_23_players <- fifa_15_to_23_players[, -c(1, 2, 4, 5, 23:32, 37:41, 83:110)]
+fifa_15_to_23_players <- fifa_15_to_23_players[, -which(names(fifa_15_to_23_players) %in% columns_to_remove)]
+fifa_15_to_23_players <- fifa_15_to_23_players[, -c(24:51)]
+
+print("---")
+print(summary(fifa_15_to_23_players))
+```
+Firstly, we want to change column 'fifa_version' to 'Season' and add new column 'position' that can have values: GK, DEF, MID, ATT. Also, we will split work_rate into two columns to get attacking and defensive work rates.
+
+```{r}
+
+fifa_15_to_23_players <- fifa_15_to_23_players %>%
+  mutate(Season = paste0("20", fifa_version - 1, "-20", fifa_version) ) %>%
+  select(-fifa_version) 
+
+get_most_common_position <- function(positions_string) {
+  position <- strsplit(positions_string, ", ")[[1]][1]
+  positionR <- case_when(
+    position == "GK" ~ "GK",
+    position %in% c("CB", "LB", "RB", "LWB", "RWB", "LCB", "RCB") ~ "DEF",
+    position %in% c("CAM", "CM", "CDM", "RM", "LM", "RCM", "LCM", "RDM", "LDM", "RAM", "LAM") ~ "MID",
+    position %in% c("ST", "CF", "RF", "LF", "RW", "LW", "RS", "LS") ~ "ATT",
+    TRUE ~ NA
+  )
+  return(positionR)
+}
+
+fifa_15_to_23_players <- fifa_15_to_23_players %>%
+  mutate(Position = case_when(
+    club_position == "GK" ~ "GK",
+    club_position %in% c("CB", "LB", "RB", "LWB", "RWB", "LCB", "RCB") ~ "DEF",
+    club_position %in% c("CAM", "CM", "CDM", "RM", "LM", "RCM", "LCM", "RDM", "LDM", "RAM", "LAM") ~ "MID",
+    club_position %in% c("ST", "CF", "RF", "LF", "RW", "LW", "RS", "LS") ~ "ATT",
+    club_position %in% c("SUB", "RES", NA) ~ sapply(player_positions, get_most_common_position),
+    TRUE ~ NA
+  ))
+
+fifa_15_to_23_players <- separate(fifa_15_to_23_players, col= work_rate, into=c('Att_work_rate', 'Def_work_rate'), sep='/')
+
+
+
+head(fifa_15_to_23_players[,c(1, 16:17, 30:31)])
+
+
+```
+Success.
+
+```{r}
+
+# Apply transformation to both long_name and short_name columns of fifa data frame
+fifa_15_to_23_players <- fifa_15_to_23_players %>%
+  mutate(
+    long_name = gsub("['\",^`~]", "", iconv(long_name, to = "ASCII//TRANSLIT")),
+    short_name = gsub("['\",^`~]", "", iconv(short_name, to = "ASCII//TRANSLIT")),
+    # Substitute "-" for " " in these columns
+    long_name = gsub("-", " ", long_name),
+    short_name = gsub("-", " ", short_name)
+  )
+
+# Apply transformation to all player columns of original data frame
+columns_to_modify <- c(paste0("H", 1:11), paste0("A", 1:11))
+
+merged_df <- merged_df %>%
+  mutate_at(vars(all_of(columns_to_modify)), 
+            ~ gsub("['\",^`~]", "", gsub("-", " ", iconv(., to = "ASCII//TRANSLIT"))))
+
+#treba ovo primjeniti i na fifa$shortName i na sve u merged_df
+#fifa_new_names
+
+#problem sa Félix ovo treba bit obicno e
+#problem sa - u imenu iz H11 npr. Hwang Hee-chan
+```
+
+
+Now, we will try to connect names of player that we currently have to their name in fifa database.
+
+
+```{r}
+library(stringr)
+
+map_name <- function(name, Season, team) { #seasonIn
+  closest_match <- "nema"
+  
+  if (team == "Bournemouth"){
+    team <- "AFC Bournemouth"
+  }
+  name_parts <- strsplit(name, " ")[[1]]
+  print(paste0("ORIGINAL NAME : ", name))
+  
+  # Filter based on the conditions
+  filtered_df <- fifa_15_to_23_players %>%
+    filter(league_name == "Premier League", Season == Season, club_name == team)
+  
+  # Check if filtered_df is empty
+  if (nrow(filtered_df) == 0) {
+    print("EMPTY EMPTY")
+    print(paste("Season:", Season, "Team:", team))
+    return(NA)
+  }
+  
+  filtered_df <- filtered_df[, c("short_name", "long_name", "Season", "league_name")]
+  
+  #potential_names is df containing every player whose long_name or short_name includes any part of the name_parts
+  potential_long_names <- filtered_df[grepl(paste(name_parts, collapse = "|"), filtered_df$long_name, ignore.case = TRUE), "long_name"]
+  potential_short_names <- filtered_df[grepl(paste(name_parts, collapse = "|"), filtered_df$short_name, ignore.case = TRUE), "short_name"]
+  
+  potential_long_names <- distinct(potential_long_names)
+  potential_short_names <- distinct(potential_short_names)
+
+
+  #print(potential_names)
+  potential_long_names <- unique(potential_long_names)
+  potential_long_names <- as.vector(unlist(potential_long_names))
+  potential_short_names <- unique(potential_short_names)
+  potential_short_names <- as.vector(unlist(potential_short_names))
+  
+  while (T) {
+    
+    if (length(potential_long_names) > 0) {
+    
+        closest_match <- potential_long_names[potential_long_names == name]
+        if (length(closest_match) == 1) {
+          break
+        }
+        
+        #print(name_parts)
+        #print(potential_long_names)
+        #print(potential_short_names)
+        
+        #long_name includes all name parts
+        filtered_names <- potential_long_names[sapply(unlist(potential_long_names), function(x) all(sapply(unlist(name_parts), function(y) grepl(y, x, ignore.case = TRUE))))]
+        
+        print(paste0("LEN POTENTIAL NAMES: ", length(potential_long_names)))
+        print(paste0("LEN FILTERED NAMES: ", length(filtered_names)))
+        if (length(filtered_names) == 1) {
+          closest_match <- filtered_names[1]
+          break
+        } else if (length(filtered_names) > 0) {
+            potential_long_names <- filtered_names
+        }
+    
+    }
+    
+    ## NOT FOUND IN LONG_NAME; CHECK THE SHORT_NAME
+    
+    if (length(potential_short_names) > 0) {
+    
+        if (length(potential_short_names) == 1) {
+          closest_match <- potential_short_names[1]
+          break
+        } else if (length(potential_short_names) > 1) {
+          
+          #short_name contains all name parts
+          filtered_short_names <- potential_short_names[sapply(unlist(potential_long_names), function(x) all(sapply(unlist(name_parts), function(y) grepl(y, x, 
+                              ignore.case = TRUE))))]
+        
+          print(paste0("POT. SHORT NAMES: ", length(potential_short_names)))
+          print(paste0("SHORT NAMES CONTAINING ALL NAME PARTS: ", length(filtered_short_names)))
+          if (length(filtered_short_names) == 1) {
+            closest_match <- filtered_short_names[1]
+            break
+          } else if (length(filtered_short_names) > 0) {
+              potential_short_names <- filtered_short_names
+          }
+          
+      
+          
+          # Filter the data frame based on the conditions
+          short_df <- filtered_df %>%
+            filter(filtered_df$short_name %in% potential_short_names)
+          
+          # Filter the data frame based on the conditions
+          long_df <- filtered_df %>%
+            filter(filtered_df$long_name %in% potential_long_names)
+          
+          filtered_df <- intersect(long_df, short_df)
+          
+          print(paste0("INTERSECT DF: "))
+          print(filtered_df)
+        }
+    
+    }
+    
+    
+    
+    if (length(potential_long_names) > 0) {
+      # Filter the data frame based on the conditions
+      filtered_df <- filtered_df %>%
+        filter(filtered_df$long_name %in% potential_long_names)
+    }
+    
+    
+  
+   ### 
+    #potential_names <- filtered_df$long_name
+    #potential_names <- unique(potential_names)
+    ####
+    
+    
+  
+    # Find the closest match using agrep
+    #closest_match <- agrep(name, potential_names, value = TRUE)
+      
+    if (length(potential_long_names) == 0) {
+      if (length(potential_short_names) == 0) {
+        print(paste0("!!KURCINA, NO POTENTIAL NAMES!!"))
+        closest_match <- NA
+        #print(filtered_df)
+      }
+      print(potential_short_names)
+      break
+    }
+     print(potential_long_names)
+    
+    #closest_match <- max(agrep(name, potential_names, value = TRUE), na.rm = TRUE) #zapravo min treba
+    #ja bi dodo jos da brojim broj djelova short name i ako je jednak sa length(name_parts) onda ostavi.
+    #problem sa Félix ovo treba bit obicno e
+    #problem sa - u imenu iz H11 npr. Hwang Hee-chan
+    closest_match <- NA
+
+        
+    break
+    
+  
+  }
+  
+#  if (closest_match == "nema"){
+#    closest_match <- NA
+#  }
+  print(paste0("PREDICTED NAME: ", closest_match)) #closest match bi trebao biti short_name iz fifa df zbog kineskih char
+  cat("\n------\n")
+  
+  return(closest_match)
+}
+
+##
+#unique_names <- unique(c(merged_df$H1, merged_df$H2, merged_df$H3, merged_df$H4, merged_df$H5,
+#                         merged_df$H6, merged_df$H7, merged_df$H8, merged_df$H9, merged_df$H10,
+#                         merged_df$H11)) #treba i tim za koji igra dodat
+
+#print(length(unique_names))
+##
+
+# Step 1: Gather all "H1" to "H11" columns into a single column named "name"
+unique_names_df <- merged_df %>%
+  select(Season, HomeTeam, AwayTeam, H1:H11, A1:A11) %>%
+  pivot_longer(cols = H1:H11, names_to = "H_column", values_to = "name") %>%
+  select(-H_column)
+
+# Step 2: Determine the corresponding team (HomeTeam or AwayTeam)
+unique_names_df <- unique_names_df %>%
+  mutate(team = HomeTeam) %>%
+  select(name, Season, team)
+
+# Step 3: Repeat the process for "A1" to "A11" columns
+unique_names_df_A <- merged_df %>%
+  select(Season, HomeTeam, AwayTeam, H1:H11, A1:A11) %>%
+  pivot_longer(cols = A1:A11, names_to = "A_column", values_to = "name") %>%
+  mutate(team = AwayTeam) %>%
+  select(name, Season, team)
+
+# Step 4: Combine both datasets and remove duplicates
+unique_names_df <- bind_rows(unique_names_df, unique_names_df_A) %>%
+  distinct()
+
+##
+#unique_names2 <- unique_names[600:700]
+
+#print(unique_names2)
+##
+
+
+#mapped_names_ULALA <- apply(unique_names_df, map_name)
+
+# Apply the function to each row using apply()
+results <- apply(unique_names_df, 1, function(row) {
+  map_name(row["name"], row["Season"], row["team"])
+})
+
+# Initialize a new column for storing results
+unique_names_df$mapped_name <- NA
+
+# Add the results to the corresponding rows in unique_names_df
+unique_names_df[, "mapped_name"] <- results
+
+
+na_count <- sum(is.na(unique_names_df))
+
+print(na_count)
+
+# Identify rows with any NA values
+rows_with_na <- apply(unique_names_df, 1, function(row) any(is.na(row)))
+
+# Create a new data frame containing only rows with NA values
+unique_names_NA <- unique_names_df[rows_with_na, ]
+
+#for each match
+```
+
+Ponavljamo proces, ali ovaj put bez striktnog ograničenja premier league i imena tima. Ponavljamo samo na dosad ne nađenim igračima (ne mapiranim).
+
+```{r}
+
+map_name <- function(name, Season) { #seasonIn
+  closest_match <- "nema"
+
+  name_parts <- strsplit(name, " ")[[1]]
+  print(paste0("ORIGINAL NAME : ", name))
+  
+  # Filter based on the conditions
+  filtered_df <- fifa_15_to_23_players %>%
+    filter(Season == Season)
+  
+  # Check if filtered_df is empty
+  if (nrow(filtered_df) == 0) {
+    print("EMPTY EMPTY")
+    print(paste("Season:", Season, " Name:", name))
+    return(NA)
+  }
+  
+  filtered_df <- filtered_df[, c("short_name", "long_name", "Season", "league_name")]
+  
+  #potential_names is df containing every player whose long_name or short_name includes any part of the name_parts
+  potential_long_names <- filtered_df[grepl(paste(name_parts, collapse = "|"), filtered_df$long_name, ignore.case = TRUE), "long_name"]
+  potential_short_names <- filtered_df[grepl(paste(name_parts, collapse = "|"), filtered_df$short_name, ignore.case = TRUE), "short_name"]
+  
+  potential_long_names <- distinct(potential_long_names)
+  potential_short_names <- distinct(potential_short_names)
+
+
+  #print(potential_names)
+  potential_long_names <- unique(potential_long_names)
+  potential_long_names <- as.vector(unlist(potential_long_names))
+  potential_short_names <- unique(potential_short_names)
+  potential_short_names <- as.vector(unlist(potential_short_names))
+  
+  while (T) {
+    
+    if (length(potential_long_names) > 0) {
+    
+        closest_match <- potential_long_names[potential_long_names == name]
+        if (length(closest_match) == 1) {
+          break
+        }
+        
+        #print(name_parts)
+        #print(potential_long_names)
+        #print(potential_short_names)
+        
+        #long_name includes all name parts
+        filtered_names <- potential_long_names[sapply(unlist(potential_long_names), function(x) all(sapply(unlist(name_parts), function(y) grepl(y, x, ignore.case = TRUE))))]
+        
+        print(paste0("LEN POTENTIAL NAMES: ", length(potential_long_names)))
+        print(paste0("LEN FILTERED NAMES: ", length(filtered_names)))
+        if (length(filtered_names) == 1) {
+          closest_match <- filtered_names[1]
+          break
+        } else if (length(filtered_names) > 0) {
+            potential_long_names <- filtered_names
+        }
+    
+    }
+    
+    ## NOT FOUND IN LONG_NAME; CHECK THE SHORT_NAME
+    
+    if (length(potential_short_names) > 0) {
+    
+        if (length(potential_short_names) == 1) {
+          closest_match <- potential_short_names[1]
+          break
+        } else if (length(potential_short_names) > 1) {
+          
+          #short_name contains all name parts
+          filtered_short_names <- potential_short_names[sapply(unlist(potential_long_names), function(x) all(sapply(unlist(name_parts), function(y) grepl(y, x, 
+                              ignore.case = TRUE))))]
+        
+          print(paste0("POT. SHORT NAMES: ", length(potential_short_names)))
+          print(paste0("SHORT NAMES CONTAINING ALL NAME PARTS: ", length(filtered_short_names)))
+          if (length(filtered_short_names) == 1) {
+            closest_match <- filtered_short_names[1]
+            break
+          } else if (length(filtered_short_names) > 0) {
+              potential_short_names <- filtered_short_names
+          }
+          
+      
+          
+          # Filter the data frame based on the conditions
+          short_df <- filtered_df %>%
+            filter(filtered_df$short_name %in% potential_short_names)
+          
+          # Filter the data frame based on the conditions
+          long_df <- filtered_df %>%
+            filter(filtered_df$long_name %in% potential_long_names)
+          
+          filtered_df <- intersect(long_df, short_df)
+          
+          print(paste0("INTERSECT DF: "))
+          print(filtered_df)
+        }
+    
+    }
+    
+    
+    
+    if (length(potential_long_names) > 0) {
+      # Filter the data frame based on the conditions
+      filtered_df <- filtered_df %>%
+        filter(filtered_df$long_name %in% potential_long_names)
+    }
+    
+    
+  
+   ### 
+    #potential_names <- filtered_df$long_name
+    #potential_names <- unique(potential_names)
+    ####
+    
+    
+  
+    # Find the closest match using agrep
+    #closest_match <- agrep(name, potential_names, value = TRUE)
+      
+    if (length(potential_long_names) == 0) {
+      if (length(potential_short_names) == 0) {
+        print(paste0("!!KURCINA, NO POTENTIAL NAMES!!"))
+        closest_match <- NA
+        #print(filtered_df)
+      }
+      print(potential_short_names)
+      break
+    }
+     print(potential_long_names)
+    
+    #closest_match <- max(agrep(name, potential_names, value = TRUE), na.rm = TRUE) #zapravo min treba
+    #ja bi dodo jos da brojim broj djelova short name i ako je jednak sa length(name_parts) onda ostavi.
+    #problem sa Félix ovo treba bit obicno e
+    #problem sa - u imenu iz H11 npr. Hwang Hee-chan
+    closest_match <- NA
+
+        
+    break
+    
+  
+  }
+  
+  if (is.na(closest_match) || closest_match == "nema"){
+    if (name == "Angel Di Maria") {
+      closest_match <- "A. Di Maria"
+    }
+    else if (name == "Javier Hernandez") {
+      closest_match <- "Javier Hernandez Balcazar"
+    }
+    else if (name == "Loic Remy") {
+      closest_match <- "L. Remy"
+    }
+    else if (name == "Ki Sung yueng") {
+      closest_match <- "Ki Sung Yueng"
+    }
+    else if (name == "Son Heung min") {
+      closest_match <- "H. Son"
+    }
+    else if (name == "Sandro") {
+      closest_match <- "Sandro Raniere Guimaraes Cordeiro"
+    }
+    else if (name == "Joao Felgx") {
+      closest_match <- "Joao Felix Sequeira"
+    }
+    else if (name == "Joe Willock") {
+      closest_match <- "Joseph Willock"
+    }
+    else {
+      closest_match <- NA
+    }
+  }
+  print(paste0("PREDICTED NAME: ", closest_match)) #closest match bi trebao biti short_name iz fifa df zbog kineskih char
+  cat("\n------\n")
+  
+  return(closest_match)
+}
+
+
+
+
+
+unique_names_NA2 <- unique_names_NA[, -which(names(unique_names_NA) == "mapped_name")]
+
+
+# Apply the function to each row using apply()
+results <- apply(unique_names_NA2, 1, function(row) {
+  map_name(row["name"], row["Season"])
+})
+
+# Initialize a new column for storing results
+unique_names_NA2$mapped_name <- NA
+
+# Add the results to the corresponding rows in unique_names_df
+unique_names_NA2[, "mapped_name"] <- results
+
+
+na_count <- sum(is.na(unique_names_NA2))
+
+print(na_count)
+
+```
+
+```{r}
+# Perform a merge to update the mapped_name in unique_names_df with values from unique_names_NA2
+unique_names_df <- merge(unique_names_df, unique_names_NA2[, c("name", "Season", "team", "mapped_name")],
+                         by = c("name", "Season", "team"), all.x = TRUE, suffixes = c("", "_updated"))
+
+# Replace the original mapped_name with the updated one if it exists
+unique_names_df$mapped_name <- ifelse(!is.na(unique_names_df$mapped_name_updated), 
+                                      unique_names_df$mapped_name_updated, 
+                                      unique_names_df$mapped_name)
+
+# Remove the temporary column used for updating
+unique_names_df$mapped_name_updated <- NULL
+
+# Check the result
+print(sum(is.na(unique_names_df)))
+
+
+
+```
+
+```{r}
+library(dplyr)
+
+# Step 1: Create map_names by selecting relevant columns and removing duplicates
+map_names <- unique_names_df[, c("name", "mapped_name")]
+
+# Step 2: Remove duplicates based on "name" and "mapped_name"
+map_names <- unique(map_names)
+
+# Step 3: Identify rows where the same "name" has both an NA and a non-NA "mapped_name"
+# Group by "name" and filter out rows where "name" has both NA and non-NA "mapped_name"
+map_names <- map_names %>%
+  group_by(name) %>%
+  filter(!(any(!is.na(mapped_name)) & is.na(mapped_name))) %>%
+  ungroup()
+
+# Step 4: Remove any remaining duplicates just in case
+map_names <- unique(map_names)
+
+
+print(sum(is.na(map_names)))
+
+
+
+```
+
+There are 21 unique players that I could not match exactly to their fifa profile, so for those we will interpret them as some average Premier League player, Victor Wanyama for players, and Tim Krul for goalkeepers.
+```{r}
+# Step 1: Define the columns to be updated in merged_df
+columns_to_update <- c(paste0("H", 1:11), paste0("A", 1:11))
+
+# Step 2: Create a copy of merged_df to perform the substitution
+merged_mapped_df <- merged_df
+
+# Step 3: Substitute each player's name in the specified columns with the corresponding mapped_name
+for (col in columns_to_update) {
+  merged_mapped_df[[col]] <- map_names$mapped_name[match(merged_df[[col]], map_names$name)]
+}
+
+# Step 4: Handle cases where the player name was not found in map_names by retaining the original name
+#for (col in columns_to_update) {
+#  merged_mapped_df[[col]] <- ifelse(is.na(merged_mapped_df[[col]]), merged_df[[col]], merged_mapped_df[[col]])
+#}
+
+# Step 1: Define the column groups
+columns_to_replace_with_delph <- c(paste0("H", 2:11), paste0("A", 2:11))
+columns_to_replace_with_krul <- c("H1", "A1")
+
+# Step 2: Replace NA values in columns H2 to H11 and A2 to A11 with "Victor Wanyama"
+for (col in columns_to_replace_with_delph) {
+  merged_mapped_df[[col]][is.na(merged_mapped_df[[col]])] <- "Victor Wanyama"
+}
+
+# Step 3: Replace NA values in columns H1 and A1 with "Tim Krul"
+for (col in columns_to_replace_with_krul) {
+  merged_mapped_df[[col]][is.na(merged_mapped_df[[col]])] <- "Tim Krul"
+}
+
+rows_with_na <- sum(apply(merged_mapped_df, 1, function(row) any(is.na(row))))
+
+# Print the result
+print(rows_with_na)
+
+
+columns_to_check <- c(paste0("H", 1:11), paste0("A", 1:11))
+
+# Count the number of NA values in the specified columns
+na_count <- sum(is.na(merged_mapped_df[ , columns_to_check]))
+
+# Print the result
+print(na_count)
+
+
+```
+
+
+We will add following columns for both Home and Away teams:
+- SUM of overalls for positions GK, DEF, MID, ATT (SUM over AVG because one team can have only 3 players in MID while the other team has 4 or 5 players in MID and we want somehow to note that info)
+- Att and Def work rate score (High +3, Medium +1, Low +0, without GK)
+- AVG Major 6 stats of 10 players (pace, shooting, passing, dribbling, defending, physic)
+- GK Major 6 stats (diving, handling, kicking, positioning, reflexes, speed)
+- AVG teams height, weight and age (without GK)
+- SUM of teams wage and value
+
+```{r}
+#temp, OBRISATI i resetirati!!
+#merged_mapped_df <- merged_mapped_df[1:380, ]
+```
+
+```{r}
+
+# Initialize global counters
+global_not_found_count <- 0
+global_duplicates_count <- 0
+
+get_player_stats <- function(player_names, season, league, club, fifa_df) {
+  print(season)
+  global_not_found_count <<- global_not_found_count  # Reference the global variable
+  global_duplicates_count <<- global_duplicates_count  # Reference the global variable
+  
+  if (!is.na(club)) {
+    if (club == "Bournemouth"){
+      club <- "AFC Bournemouth"
+    }
+  }
+  
+  player_stats_list <- list()
+  
+  for (i in 1:nrow(player_names)) {
+    player <- player_names$player[i]
+    is_gk <- player_names$is_gk[i]
+    
+    player_stat <- fifa_df %>%
+      filter(Season == season, 
+             short_name == player | long_name == player,
+             league_name == league,
+             club_name == club) %>%
+      select(short_name, long_name, Position, overall, value_eur, wage_eur, age, height_cm, weight_kg, 
+             Att_work_rate, Def_work_rate, pace, shooting, passing, dribbling, defending, physic, 
+             goalkeeping_diving, goalkeeping_handling, goalkeeping_kicking, goalkeeping_positioning, goalkeeping_reflexes, goalkeeping_speed)
+    
+    if (nrow(player_stat) == 0) {
+      try_name <- map_name(player, season)
+      
+      if (!is.na(try_name)) {
+        player_stat <- fifa_df %>%
+        filter(Season == season, 
+               short_name == try_name | long_name == try_name) %>%
+        select(short_name, long_name, Position, overall, value_eur, wage_eur, age, height_cm, weight_kg, 
+               Att_work_rate, Def_work_rate, pace, shooting, passing, dribbling, defending, physic, 
+               goalkeeping_diving, goalkeeping_handling, goalkeeping_kicking, goalkeeping_positioning, goalkeeping_reflexes,                goalkeeping_speed)
+          
+      } else {
+        
+        if (is_gk) {
+          # generic avg gk like Tim Krul
+          player_stat <- fifa_df %>%
+          filter(Season == season, 
+                 short_name == "Tim Krul" | long_name == "Tim Krul") %>%
+          select(short_name, long_name, Position, overall, value_eur, wage_eur, age, height_cm, weight_kg, 
+                 Att_work_rate, Def_work_rate, pace, shooting, passing, dribbling, defending, physic, 
+                 goalkeeping_diving, goalkeeping_handling, goalkeeping_kicking, goalkeeping_positioning, goalkeeping_reflexes,                                goalkeeping_speed)
+          
+        } else {
+          # generic avg player like Victor Wanyama
+          player_stat <- fifa_df %>%
+          filter(Season == season, 
+                 short_name == "Victor Wanyama" | long_name == "Victor Wanyama") %>%
+          select(short_name, long_name, Position, overall, value_eur, wage_eur, age, height_cm, weight_kg, 
+                 Att_work_rate, Def_work_rate, pace, shooting, passing, dribbling, defending, physic, 
+                 goalkeeping_diving, goalkeeping_handling, goalkeeping_kicking, goalkeeping_positioning, goalkeeping_reflexes,                                goalkeeping_speed)
+        }
+        
+        if (nrow(player_stat) == 0) {
+          print(" ")
+          print(" ")
+          print("!!!!!!!!!!!!!!!!!!!")
+          print(paste("NOT FOUND -", player, "-", season))
+          print(paste("NOT FOUND -", player, "-", season))
+          print("!!!!!!!!!!!!!!!!!!!")
+          print(" ")
+          print(" ")
+          global_not_found_count <<- global_not_found_count + 1
+          
+          next
+          
+        }
+        
+      }
+      
+    }
+    
+    if (nrow(player_stat) > 1) {
+      print(paste("DUPLICATE FOUND -", player, "-", season))
+      global_duplicates_count <<- global_duplicates_count + 1
+      # Handle duplicates
+      player_stat <- player_stat %>%
+        filter(row_number() == 1)
+    }
+    
+    player_stats_list[[player]] <- player_stat
+  }
+  
+  return(do.call(rbind, player_stats_list))
+}
+
+
+
+
+```
+
+```{r}
+# Calculate metrics based on position
+calculate_metrics <- function(df, position_col, positions, value_col) {
+  df %>%
+    filter(Position %in% positions) %>%
+    summarise(total = sum(!!sym(value_col), na.rm = TRUE))
+}
+
+# Calculate average values for given stats columns
+calculate_avg <- function(df, position_col, positions, stats_cols) {
+  df %>%
+    filter(Position %in% positions) %>%
+    summarise(across(all_of(stats_cols), mean, na.rm = TRUE))
+}
+
+# Calculate work rates
+calculate_work_rate <- function(df) {
+  df %>%
+    summarise(att_work_rate = sum(Att_work_rate == "High") * 3 + sum(Att_work_rate == "Medium") * 1,
+              def_work_rate = sum(Def_work_rate == "High") * 3 + sum(Def_work_rate == "Medium") * 1)
+}
+```
+
+
+```{r}
+# Initialize columns for results
+merged_mapped_df <- merged_mapped_df %>%
+  mutate(
+    HOverallGK = NA, AOverallGK = NA,
+    HOverallDEF = NA, AOverallDEF = NA,
+    HOverallMID = NA, AOverallMID = NA,
+    HOverallATT = NA, AOverallATT = NA,
+    HattWorkRate = NA, HdefWorkRate = NA,
+    AattWorkRate = NA, AdefWorkRate = NA,
+    HavgPACE = NA, HavgSHOOTING = NA, HavgPASSING = NA, HavgDRIBBLING = NA, HavgDEFENDING = NA, HavgPHYSICALITY = NA,
+    AavgPACE = NA, AavgSHOOTING = NA, AavgPASSING = NA, AavgDRIBBLING = NA, AavgDEFENDING = NA, AavgPHYSICALITY = NA,
+    HavgHeight = NA, HavgWeight = NA, HavgAge = NA,
+    AavgHeight = NA, AavgWeight = NA, AavgAge = NA,
+    HSumWage = NA, ASumWage = NA,
+    HSumValue = NA, ASumValue = NA
+  )
+
+for (i in 1:nrow(merged_mapped_df)) {
+  match_row <- merged_mapped_df[i, ]
+  season <- match_row$Season
+  
+  # Extract home and away players, including the goalkeeper
+  home_gk <- match_row$H1
+  home_players <- unlist(match_row[grepl("^H[2-9]|H10|H11$", names(match_row))])
+  
+  away_gk <- match_row$A1
+  away_players <- unlist(match_row[grepl("^A[2-9]|A10|A11$", names(match_row))])
+
+  # Combine goalkeepers with outfield players, adding a flag indicating position type
+  home_combined <- data.frame(player = c(home_gk, home_players), is_gk = c(TRUE, rep(FALSE, length(home_players))))
+  away_combined <- data.frame(player = c(away_gk, away_players), is_gk = c(TRUE, rep(FALSE, length(away_players))))
+  
+  # Pass the combined data frames to get_player_stats
+  home_stats <- get_player_stats(home_combined, season, "Premier League", match_row$HomeTeam, fifa_15_to_23_players)
+  away_stats <- get_player_stats(away_combined, season, "Premier League", match_row$AwayTeam, fifa_15_to_23_players)
+  
+  # Check if stats were returned
+  if (nrow(home_stats) > 0) {
+    
+    # Calculate work rates and assign them
+    home_work_rate <- calculate_work_rate(home_stats)
+    merged_mapped_df$HattWorkRate[i] <- home_work_rate$att_work_rate
+    merged_mapped_df$HdefWorkRate[i] <- home_work_rate$def_work_rate
+    
+    # Summing overalls for each position
+    merged_mapped_df$HOverallGK[i] <- calculate_metrics(home_stats, "Position", "GK", "overall")$total
+    merged_mapped_df$HOverallDEF[i] <- calculate_metrics(home_stats, "Position", c("DEF", "DF"), "overall")$total
+    merged_mapped_df$HOverallMID[i] <- calculate_metrics(home_stats, "Position", c("MID", "MF"), "overall")$total
+    merged_mapped_df$HOverallATT[i] <- calculate_metrics(home_stats, "Position", c("ATT", "FW"), "overall")$total
+    
+    # Average major stats
+    home_avg_stats <- calculate_avg(home_stats, "Position", c("DEF", "MID", "ATT"), c("pace", "shooting", "passing", "dribbling", "defending", "physic"))
+    merged_mapped_df[i, c("HavgPACE", "HavgSHOOTING", "HavgPASSING", "HavgDRIBBLING", "HavgDEFENDING", "HavgPHYSICALITY")] <- home_avg_stats
+    
+    # GK major stats
+    home_gk_stats <- home_stats %>% filter(Position == "GK") %>%
+      summarise(across(starts_with("goalkeeping"), mean, na.rm = TRUE))
+    merged_mapped_df[i, c("HavgDIVING", "HavgHANDLING", "HavgKICKING", "HavgPOSITIONING", "HavgREFLEXES", "HavgSPEED")] <- home_gk_stats
+    
+    # Average height, weight, and age (excluding GK)
+    merged_mapped_df$HavgHeight[i] <- mean(home_stats$height_cm, na.rm = TRUE)
+    merged_mapped_df$HavgWeight[i] <- mean(home_stats$weight_kg, na.rm = TRUE)
+    merged_mapped_df$HavgAge[i] <- mean(home_stats$age, na.rm = TRUE)
+    
+    # Summing wage and value
+    merged_mapped_df$HSumWage[i] <- sum(home_stats$wage_eur, na.rm = TRUE)
+    merged_mapped_df$HSumValue[i] <- sum(home_stats$value_eur, na.rm = TRUE)
+  }
+  
+  if (nrow(away_stats) > 0) {
+    
+    # Calculate work rates and assign them
+    away_work_rate <- calculate_work_rate(away_stats)
+    merged_mapped_df$AattWorkRate[i] <- away_work_rate$att_work_rate
+    merged_mapped_df$AdefWorkRate[i] <- away_work_rate$def_work_rate
+    
+    # Summing overalls for each position
+    merged_mapped_df$AOverallGK[i] <- calculate_metrics(away_stats, "Position", "GK", "overall")$total
+    merged_mapped_df$AOverallDEF[i] <- calculate_metrics(away_stats, "Position", c("DEF", "DF"), "overall")$total
+    merged_mapped_df$AOverallMID[i] <- calculate_metrics(away_stats, "Position", c("MID", "MF"), "overall")$total
+    merged_mapped_df$AOverallATT[i] <- calculate_metrics(away_stats, "Position", c("ATT", "FW"), "overall")$total
+    
+    # Average major stats
+    away_avg_stats <- calculate_avg(away_stats, "Position", c("DEF", "MID", "ATT"), c("pace", "shooting", "passing", "dribbling", "defending", "physic"))
+    merged_mapped_df[i, c("AavgPACE", "AavgSHOOTING", "AavgPASSING", "AavgDRIBBLING", "AavgDEFENDING", "AavgPHYSICALITY")] <- away_avg_stats
+    
+    # GK major stats
+    away_gk_stats <- away_stats %>% filter(Position == "GK") %>%
+      summarise(across(starts_with("goalkeeping"), mean, na.rm = TRUE))
+    merged_mapped_df[i, c("AavgDIVING", "AavgHANDLING", "AavgKICKING", "AavgPOSITIONING", "AavgREFLEXES", "AavgSPEED")] <- away_gk_stats
+    
+    # Average height, weight, and age (excluding GK)
+    merged_mapped_df$AavgHeight[i] <- mean(away_stats$height_cm, na.rm = TRUE)
+    merged_mapped_df$AavgWeight[i] <- mean(away_stats$weight_kg, na.rm = TRUE)
+    merged_mapped_df$AavgAge[i] <- mean(away_stats$age, na.rm = TRUE)
+    
+    # Summing wage and value
+    merged_mapped_df$ASumWage[i] <- sum(away_stats$wage_eur, na.rm = TRUE)
+    merged_mapped_df$ASumValue[i] <- sum(away_stats$value_eur, na.rm = TRUE)
+  }
+}
+
+
+```
+
+Checking results:
+
+```{r}
+print("---")
+print(summary(merged_mapped_df))
+```
+
+There are some columns with gk stats that were not intrpreted as wanted and show either 0 or NA. For those cases, we will fill them with average column value.
+
+```{r}
+# List of columns to process
+gk_columns <- c("HavgDIVING", "HavgHANDLING", "HavgKICKING", "HavgPOSITIONING", "HavgREFLEXES", "HavgSPEED",
+                "AavgDIVING", "AavgHANDLING", "AavgKICKING", "AavgPOSITIONING", "AavgREFLEXES", "AavgSPEED",
+                "HOverallGK", "AOverallGK")
+
+# Function to replace NA, NaN, and 0 values with the column mean
+replace_na_nan_zero_with_mean <- function(column) {
+  # Calculate the mean, excluding NA and NaN values
+  mean_value <- mean(column, na.rm = TRUE)
+  
+  # Replace NA and NaN with mean
+  column[is.na(column) | is.nan(column) | column == 0] <- mean_value
+  
+  return(column)
+}
+
+# Apply the function to each of the target columns
+for (col in gk_columns) {
+  merged_mapped_df[[col]] <- replace_na_nan_zero_with_mean(merged_mapped_df[[col]])
+}
+
+# Check if the columns were updated correctly
+summary(merged_mapped_df[gk_columns])
+
+```
+
+
+PREPARING DATA SET FOR ML
+
+- remove non numeric columns
+- remove columns with post match data (we need only apriori data)
+
+- referee to numeric, season to numeric
+- check and remove rows containing na
+
+```{r}
+# Combine these two sets of columns to remove
+columns_to_remove <- c(colnames(merged_mapped_df)[1:22], "Time", colnames(merged_mapped_df)[49:72])
+
+# Ensure FTR is included in the final dataframe even if it's within the removed columns
+columns_to_keep <- setdiff(colnames(merged_mapped_df), columns_to_remove)
+columns_to_keep <- c(columns_to_keep, "FTR", "Referee")
+
+# Create final_ml_df by keeping only the relevant columns
+final_ml_df <- merged_mapped_df[, columns_to_keep]
+
+# Convert Referee column to a factor and then to numeric
+final_ml_df <- final_ml_df %>%
+  mutate(Referee = as.numeric(factor(Referee)))
+
+# Convert the Season column to numeric by extracting the first 4 characters
+final_ml_df <- final_ml_df %>%
+  mutate(Season = as.numeric(substr(Season, 1, 4)))
+
+# Check the structure of the resulting dataframe
+head(final_ml_df)
+```
+
+
+
+Now we will check how many rows contain at least one NA value. Expected is 272 as before. If all is good, we will remove those as they will mess up our training.
+```{r}
+# Count the number of rows with at least one NA value
+num_rows_with_na <- sum(rowSums(is.na(final_ml_df)) > 0)
+
+# Display the result
+print(paste("Number of rows with at least one NA:", num_rows_with_na))
+
+# Remove rows with any NA values
+final_ml_df <- na.omit(final_ml_df)
+
+# Display the number of rows after removal
+print(paste("Number of rows after removing rows with NA:", nrow(final_ml_df)))
+
+head(final_ml_df)
+```
+
+Great!!
+
+
+Lets save our data set.
+
+```{r}
+# Save final_ml_df as a CSV file
+write.csv(final_ml_df, "football_pl_ml_df.csv", row.names = TRUE)
+```
+
